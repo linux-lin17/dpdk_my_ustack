@@ -2,10 +2,22 @@
 #include <rte_eal.h>
 #include <rte_ethdev.h>
 #include <rte_mempool.h>
+#include <arpa/inet.h>
 
 
 #define NUM_MBUFS       4096
 #define BURST_SIZE      128
+
+#define ENABLE_SEND     1
+
+uint8_t global_smac[RTE_ETHER_ADDR_LEN];
+uint8_t global_dmac[RTE_ETHER_ADDR_LEN];
+
+uint32_t global_sip;
+uint32_t global_dip;
+
+uint16_t global_sport;
+uint16_t global_dport;
 
 int global_portid = 0;
 
@@ -19,10 +31,18 @@ static int ustack_init_port(struct rte_mempool *mbuf_pool) {
     if (nb_sys_ports == 0) {
         rte_exit(EXIT_FAILURE, "No Supported eth found\n");
     }
+
+    struct rte_eth_dev_info dev_info;
+	rte_eth_dev_info_get(global_portid, &dev_info);
     
 // recv
     const int num_rx_queues = 1;
+
+#if ENABLE_SEND
+    const int num_tx_queues = 1;
+#else
     const int num_tx_queues = 0;
+#endif
 
     rte_eth_dev_configure(global_portid, num_rx_queues, num_tx_queues, &port_conf_default);
     
@@ -30,12 +50,61 @@ static int ustack_init_port(struct rte_mempool *mbuf_pool) {
         rte_exit(EXIT_FAILURE, "Could not setup RX queue\n");
     }
 
+#if ENABLE_SEND
+
+    struct rte_eth_txconf txq_conf = dev_info.default_txconf;
+    txq_conf.offloads = port_conf_default.rxmode.offloads;
+    if (rte_eth_tx_queue_setup(global_portid, 0, 512, rte_eth_dev_socket_id(global_portid), &txq_conf)) {
+        rte_exit(EXIT_FAILURE, "Could not setup RX queue\n");
+    }    
+
+#endif
+
 // start
     if (rte_eth_dev_start(global_portid) < 0) {
         rte_exit(EXIT_FAILURE, "Could not start\n");
     }
     
     return 0;
+}
+
+static int ustack_encode_udp_pkt(uint8_t *msg, uint8_t *data, uint16_t total_len) {
+
+	//1 ether header
+
+	struct rte_ether_hdr *eth = (struct rte_ether_hdr *)msg;
+	rte_memcpy(eth->d_addr.addr_bytes, global_dmac, RTE_ETHER_ADDR_LEN);
+	rte_memcpy(eth->s_addr.addr_bytes, global_smac, RTE_ETHER_ADDR_LEN);
+	eth->ether_type = htons(RTE_ETHER_TYPE_IPV4);
+
+	//1 ip header
+	struct rte_ipv4_hdr *ip = (struct rte_ipv4_hdr*)(eth + 1); //msg + sizeof(struct rte_ether_hdr);
+	ip->version_ihl = 0x45;
+	ip->type_of_service = 0;
+	ip->total_length = htons(total_len - sizeof(struct rte_ether_hdr));
+	ip->packet_id = 0;
+	ip->fragment_offset = 0;
+	ip->time_to_live = 64;
+	ip->next_proto_id = IPPROTO_UDP;
+	ip->src_addr = global_sip;
+	ip->dst_addr = global_dip;
+
+	ip->hdr_checksum = 0;
+	ip->hdr_checksum = rte_ipv4_cksum(ip);
+
+	//1 udp header
+
+	struct rte_udp_hdr *udp = (struct rte_udp_hdr *)(ip + 1);
+	udp->src_port = global_sport;
+	udp->dst_port = global_dport;
+	uint16_t udplen = total_len - sizeof(struct rte_ether_hdr) - sizeof(struct rte_ipv4_hdr);
+	udp->dgram_len = htons(udplen);
+
+	rte_memcpy((uint8_t*)(udp+1), data, udplen);
+	udp->dgram_cksum = 0;
+	udp->dgram_cksum = rte_ipv4_udptcp_cksum(ip, udp);
+	
+	return 0;
 }
 
 int main(int argc, char *argv[]) {
@@ -75,6 +144,42 @@ int main(int argc, char *argv[]) {
             if (iphdr->next_proto_id == IPPROTO_UDP) {
                 struct rte_udp_hdr *udphdr = (struct rte_udp_hdr *)(iphdr + 1);
 
+#if ENABLE_SEND
+
+				rte_memcpy(global_smac, ethhdr->d_addr.addr_bytes, RTE_ETHER_ADDR_LEN);
+				rte_memcpy(global_dmac, ethhdr->s_addr.addr_bytes, RTE_ETHER_ADDR_LEN);            
+
+				rte_memcpy(&global_sip, &iphdr->dst_addr, sizeof(uint32_t));
+				rte_memcpy(&global_dip, &iphdr->src_addr, sizeof(uint32_t));    
+                
+				rte_memcpy(&global_sport, &udphdr->dst_port, sizeof(uint16_t));
+				rte_memcpy(&global_dport, &udphdr->src_port, sizeof(uint16_t));
+
+				struct in_addr addr;
+				addr.s_addr = iphdr->src_addr;
+				printf("sip %s:%d --> ", inet_ntoa(addr), ntohs(udphdr->src_port));
+
+				addr.s_addr = iphdr->dst_addr;
+				printf("dip %s:%d --> ", inet_ntoa(addr), ntohs(udphdr->dst_port));
+
+				uint16_t length = ntohs(udphdr->dgram_len);  // 留痕
+				uint16_t total_len = length + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_ether_hdr);
+
+				struct rte_mbuf *mbuf = rte_pktmbuf_alloc(mbuf_pool);
+				if (!mbuf) {
+					rte_exit(EXIT_FAILURE, "Error rte_pktmbuf_alloc\n");
+				}
+				mbuf->pkt_len = total_len;
+				mbuf->data_len = total_len;
+
+
+				uint8_t *msg = rte_pktmbuf_mtod(mbuf, uint8_t *);
+
+				ustack_encode_udp_pkt(msg, (uint8_t*)(udphdr+1), total_len);
+
+				rte_eth_tx_burst(global_portid, 0, &mbuf, 1);
+
+#endif
                 printf("udp : %s\n", (char *)(udphdr + 1));
             }
 
