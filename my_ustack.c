@@ -84,7 +84,7 @@ static int ustack_init_port(struct rte_mempool *mbuf_pool) {
     struct rte_eth_txconf txq_conf = dev_info.default_txconf;
     txq_conf.offloads = port_conf_default.rxmode.offloads;
     if (rte_eth_tx_queue_setup(global_portid, 0, 512, rte_eth_dev_socket_id(global_portid), &txq_conf)) {
-        rte_exit(EXIT_FAILURE, "Could not setup RX queue\n");
+        rte_exit(EXIT_FAILURE, "Could not setup TX queue\n");
     }    
 
 #endif
