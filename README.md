@@ -16,7 +16,9 @@
 ## 🛠️ 环境依赖
 * **操作系统**：Ubuntu / Linux
 * **开发语言**：C 语言
-* **核心框架**：DPDK (当前基于稳定版 19.08.2)
+* **核心框架**：[DPDK (Data Plane Development Kit)](http://core.dpdk.org/) 
+  * 当前项目基于 DPDK 稳定版 **19.08.2**
+  * DPDK 官方开源仓库地址：[https://github.com/DPDK/dpdk](https://github.com/DPDK/dpdk)
 * **编译器**：GCC & Make
 
 ## ⚙️ 快速开始
@@ -29,3 +31,15 @@ chmod +x init_dpdk.sh
 
 # 一键挂载大页内存并绑定网卡至 igb_uio 驱动
 sudo ./init_dpdk.sh
+```
+### 2. 编译项目
+```
+# 在项目根目录执行 Make 编译
+make 
+```
+### 3. 运行协议
+```
+# 执行编译产物（同样需要 Root 权限以访问物理内存和硬件接口）
+sudo ./build/my_ustack
+```
+
